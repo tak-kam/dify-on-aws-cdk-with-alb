@@ -10,10 +10,12 @@ import { IBucket } from 'aws-cdk-lib/aws-s3';
 import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { join } from 'path';
 import { ApiGateway } from '../api/api-gateway';
+import { LoadBalancer } from '../alb/LoadBalancer';
 
 export interface ApiServiceProps {
   cluster: ICluster;
-  apigw: ApiGateway;
+  apigw?: ApiGateway;
+  lb?: LoadBalancer;
 
   postgres: Postgres;
   redis: Redis;
@@ -35,7 +37,7 @@ export class ApiService extends Construct {
   constructor(scope: Construct, id: string, props: ApiServiceProps) {
     super(scope, id);
 
-    const { cluster, apigw, postgres, redis, storageBucket, debug = false } = props;
+    const { cluster, apigw, lb, postgres, redis, storageBucket, debug = false } = props;
     const mappingName = 'api';
     const port = 5001;
 
@@ -53,6 +55,11 @@ export class ApiService extends Construct {
     });
     this.encryptionSecret = encryptionSecret;
 
+    const url = apigw?.url || lb?.url;
+    if (!url) {
+      throw new Error('Either apigw or lb is required');
+    }
+
     taskDefinition.addContainer('Main', {
       image: ecs.ContainerImage.fromRegistry(`langgenius/dify-api:${props.imageTag}`),
       // https://docs.dify.ai/getting-started/install-self-hosted/environments
@@ -68,13 +75,13 @@ export class ApiService extends Construct {
 
         // The base URL of console application web frontend, refers to the Console base URL of WEB service if console domain is
         // different from api or web app domain.
-        CONSOLE_WEB_URL: apigw.url,
+        CONSOLE_WEB_URL: url,
         // The base URL of console application api server, refers to the Console base URL of WEB service if console domain is different from api or web app domain.
-        CONSOLE_API_URL: apigw.url,
+        CONSOLE_API_URL: url,
         // The URL prefix for Service API endpoints, refers to the base URL of the current API service if api domain is different from console domain.
-        SERVICE_API_URL: apigw.url,
+        SERVICE_API_URL: url,
         // The URL prefix for Web APP frontend, refers to the Web App base URL of WEB service if web app domain is different from console or api domain.
-        APP_WEB_URL: apigw.url,
+        APP_WEB_URL: url,
 
         // The configurations of redis connection.
         REDIS_HOST: redis.endpoint,
@@ -161,7 +168,7 @@ export class ApiService extends Construct {
       new PolicyStatement({
         actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
         resources: ['*'],
-      })
+      }),
     );
 
     // Service
@@ -194,9 +201,15 @@ export class ApiService extends Construct {
     service.connections.allowToDefaultPort(postgres);
     service.connections.allowToDefaultPort(redis);
     service.node.addDependency(cluster.defaultCloudMapNamespace!);
-    service.connections.allowFrom(apigw, Port.tcp(port));
-
     const paths = ['/console/api', '/api', '/v1', '/files'];
-    apigw.addService(mappingName, service, [...paths, ...paths.map((p) => `${p}/*`)]);
+    if (apigw) {
+      service.connections.allowFrom(apigw, Port.tcp(port));
+      apigw.addService(mappingName, service, [...paths, ...paths.map((p) => `${p}/*`)]);
+    }
+    if (lb) {
+      service.connections.allowFrom(lb, Port.tcp(port));
+      lb.addTarget(service, port, paths, 1, '/health');
+      lb.addTarget(service, port, [...paths.map((p) => `${p}/*`)], 2, '/health');
+    }
   }
 }

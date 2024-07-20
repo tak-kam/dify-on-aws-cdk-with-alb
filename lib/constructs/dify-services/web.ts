@@ -3,10 +3,12 @@ import { Construct } from 'constructs';
 import { Duration, aws_ecs as ecs } from 'aws-cdk-lib';
 import { Port } from 'aws-cdk-lib/aws-ec2';
 import { ApiGateway } from '../api/api-gateway';
+import { LoadBalancer } from '../alb/LoadBalancer';
 
 export interface WebServiceProps {
   cluster: ICluster;
-  apigw: ApiGateway;
+  apigw?: ApiGateway;
+  lb?: LoadBalancer;
 
   imageTag: string;
 
@@ -21,7 +23,7 @@ export class WebService extends Construct {
   constructor(scope: Construct, id: string, props: WebServiceProps) {
     super(scope, id);
 
-    const { cluster, apigw, debug = false } = props;
+    const { cluster, apigw, lb, debug = false } = props;
     const mappingName = 'web';
     const port = 3000;
 
@@ -30,6 +32,11 @@ export class WebService extends Construct {
       memoryLimitMiB: 512,
       runtimePlatform: { cpuArchitecture: CpuArchitecture.X86_64 },
     });
+
+    const url = apigw?.url || lb?.url;
+    if (!url) {
+      throw new Error('Either apigw or lb is required');
+    }
 
     taskDefinition.addContainer('Main', {
       image: ecs.ContainerImage.fromRegistry(`langgenius/dify-web:${props.imageTag}`),
@@ -42,10 +49,10 @@ export class WebService extends Construct {
 
         // The base URL of console application api server, refers to the Console base URL of WEB service if console domain is different from api or web app domain.
         // example: http://cloud.dify.ai
-        CONSOLE_API_URL: apigw.url,
+        CONSOLE_API_URL: url,
         // The URL prefix for Web APP frontend, refers to the Web App base URL of WEB service if web app domain is different from console or api domain.
         // example: http://udify.app
-        APP_API_URL: apigw.url,
+        APP_API_URL: url,
 
         // Set host to 0.0.0.0 seems necessary for ECS Service Connect to work.
         // https://nextjs.org/docs/pages/api-reference/next-config-js/output
@@ -92,8 +99,15 @@ export class WebService extends Construct {
       enableExecuteCommand: true,
     });
     service.node.addDependency(cluster.defaultCloudMapNamespace!);
-    service.connections.allowFrom(apigw, Port.tcp(port));
 
-    apigw.addService(mappingName, service, ['/*']);
+    const paths = ['/*'];
+    if (apigw) {
+      service.connections.allowFrom(apigw, Port.tcp(port));
+      apigw.addService(mappingName, service, paths);
+    }
+    if (lb) {
+      service.connections.allowFrom(lb, Port.tcp(port));
+      lb.addTarget(service, port, paths, 100, '/');
+    }
   }
 }

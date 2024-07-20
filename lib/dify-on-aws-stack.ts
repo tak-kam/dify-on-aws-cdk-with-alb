@@ -1,5 +1,16 @@
 import * as cdk from 'aws-cdk-lib';
-import { AmazonLinuxCpuType, IVpc, InstanceClass, InstanceSize, InstanceType, MachineImage, NatProvider, Peer, Port, Vpc } from 'aws-cdk-lib/aws-ec2';
+import {
+  AmazonLinuxCpuType,
+  IVpc,
+  InstanceClass,
+  InstanceSize,
+  InstanceType,
+  MachineImage,
+  NatProvider,
+  Peer,
+  Port,
+  Vpc,
+} from 'aws-cdk-lib/aws-ec2';
 import { Cluster } from 'aws-cdk-lib/aws-ecs';
 import { Construct } from 'constructs';
 import { Postgres } from './constructs/postgres';
@@ -10,6 +21,7 @@ import { ApiService } from './constructs/dify-services/api';
 import { WorkerService } from './constructs/dify-services/worker';
 import { ApiGateway } from './constructs/api/api-gateway';
 import { NamespaceType } from 'aws-cdk-lib/aws-servicediscovery';
+import { LoadBalancer } from './constructs/alb/LoadBalancer';
 
 interface DifyOnAwsStackProps extends cdk.StackProps {
   /**
@@ -57,6 +69,11 @@ export class DifyOnAwsStack extends cdk.Stack {
 
     const { difyImageTag: imageTag = 'latest' } = props;
 
+    const albContext = this.node.tryGetContext('alb');
+    const albEnabled = albContext?.enabled;
+    const domainName = albContext?.domainName;
+    const hostedZoneId = albContext?.hostedZoneId;
+
     let vpc: IVpc;
     if (props.vpcId != null) {
       vpc = Vpc.fromLookup(this, 'Vpc', { vpcId: props.vpcId });
@@ -96,21 +113,35 @@ export class DifyOnAwsStack extends cdk.Stack {
       blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
     });
 
-    const apigw = new ApiGateway(this, 'ApiGateway', {
-      vpc,
-      namespace: cluster.defaultCloudMapNamespace!,
-      allowedCidrs: props.allowedCidrs,
-    });
+    const apigw = albEnabled
+      ? undefined
+      : new ApiGateway(this, 'ApiGateway', {
+          vpc,
+          namespace: cluster.defaultCloudMapNamespace!,
+          allowedCidrs: props.allowedCidrs,
+        });
+
+    const lb = albEnabled
+      ? new LoadBalancer(this, 'LoadBalancer', {
+          vpc,
+          allowedCidrs: props.allowedCidrs,
+          hostName: 'dify',
+          domainName,
+          hostedZoneId,
+        })
+      : undefined;
 
     new WebService(this, 'WebService', {
       cluster,
       apigw,
+      lb,
       imageTag,
     });
 
     const api = new ApiService(this, 'ApiService', {
       cluster,
       apigw,
+      lb,
       postgres,
       redis,
       storageBucket,
